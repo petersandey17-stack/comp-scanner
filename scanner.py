@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Instant-win break-even scanner."""
+"""Instant-win break-even scanner (Stealth + RaffleX sites like Kilted)."""
 import os
 import re
 import time
@@ -10,8 +10,9 @@ from bs4 import BeautifulSoup
 
 NTFY_TOPIC = os.environ.get("NTFY_TOPIC", "")
 CREDIT_WEIGHT = float(os.environ.get("CREDIT_WEIGHT", "0.5"))
+TICKET_WEIGHT = float(os.environ.get("TICKET_WEIGHT", "0.5"))
 MARGIN = float(os.environ.get("MARGIN", "1.0"))
-MAX_PAGES = int(os.environ.get("MAX_PAGES", "60"))
+MAX_PAGES = int(os.environ.get("MAX_PAGES", "120"))
 UA = {"User-Agent": "Mozilla/5.0"}
 
 # Prizes with no £ amount in the name. Values are ESTIMATES: edit them.
@@ -37,6 +38,9 @@ def prize_value(title):
     for name, v in NAMED_VALUES.items():
         if name in t:
             return float(v)
+    if "TICKET" in t:  # entries into another draw: only count '£30 ticket bundle'
+        m = re.search(r"£\s*([\d,]+(?:\.\d+)?)\s*TICKET BUNDLE", t)
+        return float(m.group(1).replace(",", "")) * TICKET_WEIGHT if m else None
     m = re.search(r"£\s*([\d,]+(?:\.\d+)?)", t)
     if m:
         v = float(m.group(1).replace(",", ""))
@@ -53,12 +57,16 @@ def analyse(text):
         m = re.search(r"£(\d+(?:\.\d+)?)\s*Per Ticket", text, re.I)
         if m:
             price = float(m.group(1))
+        else:  # Kilted style: a line that is just the price
+            m = re.search(r"^£(\d+(?:\.\d+)?)$", text, re.M)
+            if m:
+                price = float(m.group(1))
 
     total = None
     m = re.search(r"Max Tickets:\s*([\d,]+)", text)
     if m:
         total = num(m.group(1))
-    m = re.search(r"Sold\s*([\d,]+)\s*/\s*([\d.,]+)\s*(k?)", text, re.I)
+    m = re.search(r"Sold\s*([\d,]+)\s*/\s*([\d.,]+)(k?)(?![A-Za-z])", text, re.I)
     sold = num(m.group(1)) if m else None
     if total is None and m:
         total = int(float(m.group(2).replace(",", "")) * (1000 if m.group(3) else 1))
@@ -69,10 +77,12 @@ def analyse(text):
     lines = [l.strip() for l in text.splitlines() if l.strip()]
     prizes, unknown, value_left = [], [], 0.0
     for i, line in enumerate(lines):
-        m = re.fullmatch(r"([\d,]+)/([\d,]+) Remain", line)
+        m = re.fullmatch(r"([\d,]+)/([\d,]+) (Remain|Found)", line)
         if not m or i == 0:
             continue
-        left, title = num(m.group(1)), lines[i - 1]
+        a, b = num(m.group(1)), num(m.group(2))
+        left = a if m.group(3) == "Remain" else b - a  # Kilted says "Found"
+        title = lines[i - 1]
         v = prize_value(title)
         if v is None:
             unknown.append(clean(title))
@@ -161,8 +171,6 @@ def main():
         name = url.rsplit("/", 1)[-1]
         print(f"{'** ' if flag else '   '}{name}: worth {a['ev']*100:.0f}p vs {a['price']*100:.0f}p price, "
               f"{a['tickets_left']:,} tickets left")
-        if a["unknown"]:
-            print(f"     WARNING no value for: {', '.join(a['unknown'])}")
         if flag:
             notify(f"{url}\n{a['ev']*100:.0f}p value per ticket vs {a['price']*100:.0f}p price. "
                    f"{a['tickets_left']:,} tickets left.")
